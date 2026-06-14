@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
+import requests
+import os
 
 app = FastAPI()
 
@@ -14,59 +14,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model_id = "anu111222/cyberbully-detector"
-device = torch.device("cpu")
+# -------------------------
+# Hugging Face config
+# -------------------------
+HF_TOKEN = os.getenv("HF_TOKEN")  # set in Render environment variables
 
-# ----------------------------
-# Load ON START (IMPORTANT FIX)
-# ----------------------------
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForSequenceClassification.from_pretrained(model_id)
-model.to(device)
-model.eval()
+API_URL = "https://api-inference.huggingface.co/models/anu111222/cyberbully-detector"
 
+headers = {
+    "Authorization": f"Bearer {HF_TOKEN}"
+}
+
+# -------------------------
+# Request schema
+# -------------------------
 class InputText(BaseModel):
     text: str
 
+
 label_cols = [
-    "toxic", "obscene", "insult",
-    "severe_toxic", "identity_hate", "threat"
+    "toxic",
+    "obscene",
+    "insult",
+    "severe_toxic",
+    "identity_hate",
+    "threat"
 ]
 
-index_to_label = {i: label for i, label in enumerate(label_cols)}
 
 @app.get("/")
 def root():
-    return {"status": "running"}
+    return {"status": "running (HF API mode)"}
 
+
+# -------------------------
+# Call Hugging Face API
+# -------------------------
 @app.post("/predict")
-def predict(input_data: InputText):
+def predict(data: InputText):
 
-    text = input_data.text
-
-    if not text.strip():
+    if not data.text.strip():
         return {"predicted_labels": []}
 
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True
-    )
+    payload = {
+        "inputs": data.text
+    }
 
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    response = requests.post(API_URL, headers=headers, json=payload)
 
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits
-        probs = torch.sigmoid(logits).squeeze().tolist()
+    result = response.json()
+
+    # Handle HF response format
+    if isinstance(result, dict) and "error" in result:
+        return {"error": result["error"], "predicted_labels": []}
+
+    try:
+        scores = result[0]
+    except:
+        return {"predicted_labels": []}
 
     threshold = 0.5
 
     predicted_labels = [
-        index_to_label[i]
-        for i, p in enumerate(probs)
-        if p >= threshold
+        label_cols[i]
+        for i, item in enumerate(scores)
+        if item["score"] >= threshold
     ]
 
-    return {"predicted_labels": predicted_labels}
+    return {
+        "predicted_labels": predicted_labels
+    }

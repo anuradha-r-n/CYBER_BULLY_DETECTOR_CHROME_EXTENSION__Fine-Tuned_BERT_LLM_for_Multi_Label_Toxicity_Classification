@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 
@@ -16,7 +17,12 @@ app.add_middleware(
 model_id = "anu111222/cyberbully-detector"
 
 # ----------------------------
-# Lazy loading (IMPORTANT FIX)
+# Device setup (DO ONCE)
+# ----------------------------
+device = torch.device("cpu")  # safer for Render + local consistency
+
+# ----------------------------
+# Lazy loading
 # ----------------------------
 tokenizer = None
 model = None
@@ -29,17 +35,25 @@ def load_model():
 
     if model is None:
         model = AutoModelForSequenceClassification.from_pretrained(model_id)
+        model.to(device)
         model.eval()
 
     return tokenizer, model
 
 
 # ----------------------------
-# Health check endpoint
+# Health check
 # ----------------------------
 @app.get("/")
 def root():
     return {"status": "running"}
+
+
+# ----------------------------
+# Input schema (IMPORTANT FIX)
+# ----------------------------
+class InputText(BaseModel):
+    text: str
 
 
 # ----------------------------
@@ -53,24 +67,23 @@ label_cols = [
     "identity_hate",
     "threat"
 ]
+
 index_to_label = {i: label for i, label in enumerate(label_cols)}
 
 
 # ----------------------------
-# Prediction endpoint
+# Prediction endpoint (FIXED)
 # ----------------------------
 @app.post("/predict")
-async def predict(request: Request):
+def predict(input_data: InputText):
+
+    text = input_data.text
+
+    if not text.strip():
+        return {"error": "No text provided", "predicted_labels": []}
 
     tokenizer, model = load_model()
 
-    data = await request.json()
-    text = data.get("text", "")
-
-    if not text.strip():
-        return {"error": "No text provided"}
-
-    # Tokenize input
     inputs = tokenizer(
         text,
         return_tensors="pt",
@@ -78,23 +91,21 @@ async def predict(request: Request):
         truncation=True
     )
 
-    # Move inputs to same device as model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    # Model inference
     with torch.no_grad():
         outputs = model(**inputs)
         logits = outputs.logits
-        probs = torch.sigmoid(logits).squeeze().cpu().tolist()
+        probs = torch.sigmoid(logits).squeeze().tolist()
 
-    # Thresholding
     threshold = 0.5
+
     predicted_labels = [
         index_to_label[i]
         for i, p in enumerate(probs)
         if p >= threshold
     ]
 
-    return {"predicted_labels": predicted_labels}
+    return {
+        "predicted_labels": predicted_labels
+    }
